@@ -1,0 +1,14 @@
+{
+  "admin": {
+    "username": "admin",
+    "password": "admin123",
+    "role": "admin",
+    "createdAt": 1739750400000
+  },
+  "rboucher": {
+    "username": "rboucher",
+    "password": "rboucher123",
+    "role": "user",
+    "createdAt": 1771381458706
+  }
+}
