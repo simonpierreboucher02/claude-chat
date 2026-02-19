@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import 'katex/dist/katex.min.css';
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -23,11 +26,20 @@ function CopyButton({ text }: { text: string }) {
 export default function Markdown({ content }: { content: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkMath]}
+      rehypePlugins={[rehypeKatex]}
       components={{
-        code({ className, children, ...props }) {
-          const match = /language-(\w+)/.exec(className || '');
-          const codeStr = String(children).replace(/\n$/, '');
+        code({ className, children, node, ...props }) {
+          const classStr = className || '';
+
+          // Skip math nodes - let KaTeX handle them
+          if (classStr.includes('math') || classStr.includes('katex')) {
+            return <code className={classStr} {...props}>{children}</code>;
+          }
+
+          const match = /language-(\w+)/.exec(classStr);
+          const codeStr = String(children ?? '').replace(/\n$/, '');
+
           if (match) {
             return (
               <div className="code-block">
@@ -57,6 +69,13 @@ export default function Markdown({ content }: { content: string }) {
               {children}
             </code>
           );
+        },
+        // Let KaTeX rendered spans/divs pass through
+        span({ className, children, node, ...props }) {
+          if (className && (className.includes('katex') || className.includes('math'))) {
+            return <span className={className} {...props} dangerouslySetInnerHTML={undefined}>{children}</span>;
+          }
+          return <span className={className} {...props}>{children}</span>;
         },
         table({ children }) {
           return (

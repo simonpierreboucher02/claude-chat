@@ -378,11 +378,13 @@ body {
 .messages-container {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px 16px;
   display: flex;
   flex-direction: column;
   gap: 20px;
   background: #ffffff;
+  min-height: 0;
 }
 
 .messages-container::-webkit-scrollbar {
@@ -441,6 +443,7 @@ body {
   line-height: 1.65;
   word-break: break-word;
   overflow: hidden;
+  min-width: 0;
 }
 
 .message.user .message-bubble {
@@ -529,6 +532,30 @@ body {
   border: none;
   border-top: 1px solid #e5e5e5;
   margin: 14px 0;
+}
+
+/* LaTeX / KaTeX */
+.message.assistant .message-bubble .katex-display {
+  margin: 14px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 0;
+}
+
+.message.assistant .message-bubble .katex {
+  font-size: 1.05em;
+  color: #1a1a1a;
+}
+
+.message.assistant .message-bubble .katex-display > .katex {
+  font-size: 1.15em;
+}
+
+.message.assistant .message-bubble .katex-error {
+  color: #999;
+  font-size: 13px;
+  overflow: hidden;
+  max-height: 1.8em;
 }
 
 /* Inline code */

@@ -320,7 +320,7 @@ function ChatApp({ user, onLogout }: { user: UserInfo; onLogout: () => void }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showAdmin, setShowAdmin] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -331,7 +331,10 @@ function ChatApp({ user, onLogout }: { user: UserInfo; onLogout: () => void }) {
   }, [conversations, user.username]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
   }, [activeConv?.messages]);
 
   const autoResize = useCallback(() => {
@@ -634,7 +637,7 @@ function ChatApp({ user, onLogout }: { user: UserInfo; onLogout: () => void }) {
           )}
         </div>
 
-        <div className="messages-container">
+        <div className="messages-container" ref={messagesContainerRef}>
           {(!activeConv || activeConv.messages.length === 0) && (
             <div className="empty-state">
               <div className="icon">💬</div>
@@ -671,7 +674,6 @@ function ChatApp({ user, onLogout }: { user: UserInfo; onLogout: () => void }) {
               </div>
             </div>
           )}
-          <div ref={messagesEndRef} />
         </div>
 
         <div className="input-area">
