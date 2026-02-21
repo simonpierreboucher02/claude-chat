@@ -17,6 +17,22 @@ const PORT = process.env.PORT || 3002;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const USERS_FILE = path.join(__dirname, 'users.json');
 const SHARES_FILE = path.join(__dirname, 'shares.json');
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const CONVERSATIONS_FILE = path.join(__dirname, 'conversations.json');
+
+// ---- Conversations persistence ----
+function loadAllConversations() {
+  try {
+    return JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, 'utf8'));
+  } catch {
+    fs.writeFileSync(CONVERSATIONS_FILE, '{}');
+    return {};
+  }
+}
+
+function saveAllConversations(data) {
+  fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(data, null, 2));
+}
 
 // ---- Shares management ----
 function loadShares() {
@@ -150,12 +166,73 @@ function sendSSE(res, data) {
   if (typeof res.flush === 'function') res.flush();
 }
 
+// ---- Conversations endpoints ----
+app.get('/api/conversations', authMiddleware, (req, res) => {
+  const all = loadAllConversations();
+  res.json(all[req.user.username] || []);
+});
+
+app.put('/api/conversations', authMiddleware, (req, res) => {
+  const { conversations } = req.body;
+  if (!Array.isArray(conversations)) {
+    return res.status(400).json({ error: 'conversations must be an array' });
+  }
+  const all = loadAllConversations();
+  all[req.user.username] = conversations;
+  saveAllConversations(all);
+  res.json({ ok: true });
+});
+
+// ---- Default max tokens per model ----
+const MODEL_MAX_TOKENS = {
+  'claude-sonnet-4-5-20250929': 64000,
+  'claude-opus-4-6': 128000,
+  'x-ai/grok-4.1-fast': 32768,
+  'x-ai/grok-4-fast': 32768,
+  'google/gemini-3.1-pro-preview': 16384,
+  'google/gemini-3-flash-preview': 16384,
+  'google/gemini-3-pro-preview': 16384,
+  'qwen/qwen3.5-plus-02-15': 32768,
+  'minimax/minimax-m2.5': 16384,
+  'z-ai/glm-5': 16384,
+  'openai/gpt-5.2': 32768,
+};
+
+// ---- SSE stream parser helper ----
+async function parseSSEStream(reader, decoder, onChunk) {
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        const data = line.slice(6).trim();
+        if (!data || data === '[DONE]') continue;
+        try { onChunk(JSON.parse(data)); } catch {}
+      }
+    }
+  }
+  // flush remaining buffer
+  if (buffer.trim().startsWith('data: ')) {
+    const data = buffer.trim().slice(6).trim();
+    if (data && data !== '[DONE]') {
+      try { onChunk(JSON.parse(data)); } catch {}
+    }
+  }
+}
+
 // ---- Streaming chat endpoint ----
 app.post('/api/chat', authMiddleware, async (req, res) => {
-  const { messages, model } = req.body;
+  const { messages, model, system, temperature, max_tokens } = req.body;
 
-  if (!ANTHROPIC_API_KEY) {
-    return res.status(500).json({ error: 'API key not configured' });
+  const isOpenRouter = model && model.includes('/');
+  const apiKey = isOpenRouter ? OPENROUTER_API_KEY : ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    return res.status(500).json({ error: isOpenRouter ? 'OpenRouter API key not configured' : 'Anthropic API key not configured' });
   }
 
   res.setHeader('Content-Type', 'text/event-stream');
@@ -164,76 +241,107 @@ app.post('/api/chat', authMiddleware, async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
 
-  const keepAlive = setInterval(() => {
-    res.write(': keepalive\n\n');
-  }, 15000);
+  const keepAlive = setInterval(() => { res.write(': keepalive\n\n'); }, 15000);
+  const cleanMsgs = messages.map(({ role, content }) => ({ role, content }));
+  const defaultMaxTokens = MODEL_MAX_TOKENS[model] || 16384;
+  const maxTokens = max_tokens || defaultMaxTokens;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: model || 'claude-sonnet-4-5-20250929',
-        max_tokens: model === 'claude-opus-4-6' ? 128000 : 64000,
+    let response;
+
+    if (isOpenRouter) {
+      // ── OpenRouter (OpenAI-compatible) ──
+      const orMessages = [];
+      if (system && system.trim()) {
+        orMessages.push({ role: 'system', content: system.trim() });
+      }
+      orMessages.push(...cleanMsgs);
+
+      const body = {
+        model,
+        messages: orMessages,
         stream: true,
-        messages: messages,
-      }),
-    });
+        max_tokens: maxTokens,
+      };
+      if (temperature !== undefined && temperature !== null) body.temperature = temperature;
 
-    if (!response.ok) {
-      const errText = await response.text();
-      sendSSE(res, { type: 'error', error: errText });
-      clearInterval(keepAlive);
-      res.end();
-      return;
-    }
+      response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'https://claude-chat.local',
+          'X-Title': 'Claude Chat',
+        },
+        body: JSON.stringify(body),
+      });
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+      if (!response.ok) {
+        const errText = await response.text();
+        sendSSE(res, { type: 'error', error: errText });
+        clearInterval(keepAlive); res.end(); return;
+      }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let inputTokens = 0, outputTokens = 0;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6).trim();
-          if (!data || data === '[DONE]') continue;
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-              sendSSE(res, { type: 'text', text: parsed.delta.text });
-            } else if (parsed.type === 'message_stop') {
-              sendSSE(res, { type: 'done' });
-            } else if (parsed.type === 'message_start' && parsed.message?.usage) {
-              sendSSE(res, { type: 'usage', usage: parsed.message.usage });
-            } else if (parsed.type === 'error') {
-              sendSSE(res, { type: 'error', error: parsed.error?.message || 'Unknown API error' });
-            }
-          } catch (e) {}
+      await parseSSEStream(reader, decoder, (parsed) => {
+        // OpenAI-style streaming delta
+        const delta = parsed.choices?.[0]?.delta;
+        if (delta?.content) {
+          sendSSE(res, { type: 'text', text: delta.content });
         }
-      }
-    }
+        // Token usage (sent in final chunk or usage field)
+        if (parsed.usage) {
+          inputTokens = parsed.usage.prompt_tokens || 0;
+          outputTokens = parsed.usage.completion_tokens || 0;
+        }
+      });
 
-    if (buffer.trim().startsWith('data: ')) {
-      const data = buffer.trim().slice(6).trim();
-      if (data && data !== '[DONE]') {
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            sendSSE(res, { type: 'text', text: parsed.delta.text });
-          }
-        } catch (e) {}
+      if (inputTokens || outputTokens) {
+        sendSSE(res, { type: 'usage', usage: { input_tokens: inputTokens, output_tokens: outputTokens } });
       }
+
+    } else {
+      // ── Anthropic ──
+      const body = {
+        model: model || 'claude-sonnet-4-5-20250929',
+        max_tokens: maxTokens,
+        stream: true,
+        messages: cleanMsgs,
+      };
+      if (system && system.trim()) body.system = system.trim();
+      if (temperature !== undefined && temperature !== null) body.temperature = temperature;
+
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        sendSSE(res, { type: 'error', error: errText });
+        clearInterval(keepAlive); res.end(); return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      await parseSSEStream(reader, decoder, (parsed) => {
+        if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+          sendSSE(res, { type: 'text', text: parsed.delta.text });
+        } else if (parsed.type === 'message_start' && parsed.message?.usage) {
+          sendSSE(res, { type: 'usage', usage: parsed.message.usage });
+        } else if (parsed.type === 'error') {
+          sendSSE(res, { type: 'error', error: parsed.error?.message || 'API error' });
+        }
+      });
     }
 
     sendSSE(res, { type: 'done' });

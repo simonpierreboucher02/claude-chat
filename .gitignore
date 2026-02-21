@@ -2,5 +2,7 @@ node_modules/
 dist/
 .env
 shares.json
+conversations.json
+users.json
 .DS_Store
 .claude/
